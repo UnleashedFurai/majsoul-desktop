@@ -1,7 +1,6 @@
 {
-  "name": "majsoul-desktop",
-  "productName": "Mahjong Soul",
-  "version": "1.0.0",
+  "name": "majsoul",
+  "productName": "majsoul",
   "main": "main.js",
   "scripts": {
 	  "start": "NODE_ENV=development electron .",
