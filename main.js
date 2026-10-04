@@ -7,8 +7,9 @@ const os = require('os')
 const net = require('net')
 const path = require('path')
 
+const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production'
+
 const REPO_DIR = __dirname
-const MM_DIR = path.join(REPO_DIR, 'MajsoulMax')
 const DATA_DIR = path.join(
 	process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'),
 	'majsoul'
@@ -17,8 +18,12 @@ const CONFIG_DIR = path.join(
 	process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
 	'majsoul'
 )
-const VENV_DIR = path.join(DATA_DIR, 'venv')
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json')
+const MM_DIR = path.join(DATA_DIR, 'MajsoulMax')
+const VENV_DIR = path.join(DATA_DIR, 'venv')
+const MITMDUMP_PATH = path.join(VENV_DIR, 'bin', 'mitmdump')
+const PACKAGED_MM_DIR = isDev ? null : path.join(process.resourcesPath, 'MajsoulMax')
+const PACKAGED_VENV_DIR = isDev ? null : path.join(process.resourcesPath, 'venv')
 
 // Server definitions
 const SERVERS = {
@@ -49,6 +54,43 @@ console.log('[setup] Starting mitmproxy & app...')
 fs.mkdirSync(CONFIG_DIR, { recursive: true })
 fs.mkdirSync(DATA_DIR, { recursive: true })
 fs.mkdirSync(VENV_DIR, { recursive: true })
+
+// Helper to get unpacked resource paths
+function getUnpackedResourcePath(subPath) {
+	if (isDev) {
+		return path.join(REPO_DIR, subPath)
+	}
+	return path.join(process.resourcesPath, subPath)
+}
+
+// Recursively copy a directory
+function copyDir(src, dest) {
+	fs.mkdirSync(dest, { recursive: true})
+	for (const entry of fs.readdirSync(src, { withFileTypes: true})) {
+		const s = path.join(src, entry.name)
+		const d = path.join(dest, entry.name)
+		if ( entry.isDirectory()) copyDir(s, d)
+		else fs.copyFileSync(s, d)
+	}
+}
+
+// Deploy bundled Majsoulmax + venv to the writable data dir on first run
+function deployResources() {
+	if (isDev) {
+		// In dev, just use the repo copy directly
+		return
+	}
+
+	// In venv, copy if missing
+	if (!fs.existsSync(MITMDUMP_PATH)) {
+		console.log('[setup] Deploying bundled venv to data dir...')
+		copyDir(PACKAGED_VENV_DIR, VENV_DIR)
+	}
+	if (!fs.existsSync(path.join(MM_DIR, 'addons.py'))) {
+		console.log('[setup] Deploying MajsoulMax to data dir...')
+		copyDir(PACKAGED_MM_DIR, MM_DIR)
+	}
+}
 
 // Load config
 function loadConfig() {
@@ -115,42 +157,16 @@ async function showServerSelection() {
 
 // Create venv if needed
 async function ensureVenv() {
-	const pipPath = path.join(VENV_DIR, 'bin', 'pip')
-
-	// Check if pip exists
-	if (!fs.existsSync(pipPath)) {
-		console.log('[setup] Creating Python venv...')
-		try {
-			execSync(`python3 -m venv ${VENV_DIR}`, { stdio: 'inherit' })
-			console.log('[setup] Installing mitmproxy + MajsoulMax dependencies...')
-			execSync(`${pipPath} install -r ${path.join(MM_DIR, 'requirements.txt')}`, { stdio: 'inherit' })
-			fs.writeFileSync(path.join(VENV_DIR, 'ready'), '')
-			console.log('[setup] Venv ready')
-			return true
-		} catch (err) {
-			console.error('[ERROR] Failed to setup venv:', err.message)
-			return false
+	if (isDev) {
+		if (!fs.existsSync(path.join(VENV_DIR, 'bin', 'mitmdump'))) {
+			console.log('[setup] Creating Python venv...')
+			execSync(`python3 -m venv "${VENV_DIR}"`, { stdio: 'inherit' })
+			execSync(`${path.join(VENV_DIR, 'bin', 'pip')} install -r "${path.join(REPO_DIR, 'MajsoulMax', 'requirements.txt')}"`, {stdio: 'inherit' })
 		}
+		return true
 	}
-
-	// Check if requirements need updating
-	const pipReq = path.join(VENV_DIR, 'bin', 'pip')
-	const reqHash = path.join(DATA_DIR, '.req_hash')
-
-	try {
-		const currentHash = execSync(`md5sum ${path.join(MM_DIR, 'requirements.txt')} | cut -d' ' -f1`, { encoding: 'utf8' }).trim()
-		const savedHash = fs.existsSync(reqHash) ? fs.readFileSync(reqHash, 'utf8').trim() : ''
-
-		if (currentHash !== savedHash) {
-			console.log('[setup] Requirements changed, reinstalling...')
-			execSync(`${pipReq} install -r ${path.join(MM_DIR, 'requirements.txt')}`, { stdio: 'inherit' })
-			fs.writeFileSync(reqHash, currentHash)
-		}
-	} catch (err) {
-		console.warn('[WARN] Could not check requirements hash:', err.message)
-	}
-
-	return true
+	// prod: deployResources() handled this
+	return fs.existsSync(path.join(VENV_DIR, 'bin', 'mitmdump'))
 }
 
 function portOpen(port) {
@@ -182,11 +198,35 @@ process.on('unhandledRejection', (reason, p) => {
 
 // Main function
 async function main() {
-	// 1. Load config
+	// Load config
 	let cfg = loadConfig()
 	const needsServerSelection = isFirstRun(cfg)
 
-	// 2. Show server selection if needed
+	// Deploy writable copies of Majsoulmax and venv (prod)
+	deployResources()
+
+	// Ensure venv exists
+	const venvOk = await ensureVenv()
+	if (!venvOk) {
+		console.error('[ERROR] Failed to setup Python environment')
+		dialog.showErrorBox(
+			'Setup Failed',
+			'Failed to create Python environment for mitmproxy.\n\n' +
+				'Please check your system has Python 3 installed.'
+		)
+		app.quit()
+		return
+	}
+
+	// Start mitmdump from isolated venv
+	console.log('[mitmdump] Starting from isolated venv...')
+	const mitm = spawn(path.join(VENV_DIR, 'bin', 'python'), [
+		path.join(VENV_DIR, 'bin', 'mitmdump'),
+		'-p', String(cfg.port),
+		'-s', 'addons.py',
+	], { cwd: MM_DIR })
+
+	// Show server selection if needed
 	if (needsServerSelection) {
 		const selectedServer = await showServerSelection()
 		if (!selectedServer) {
@@ -200,40 +240,26 @@ async function main() {
 		fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2))
 	}
 
-	// 3. Get resolved URL
+	// Get resolved URL
 	const serverInfo = SERVERS[cfg.server]
 	const gameUrl = serverInfo.url
 
 	console.log('[config] Selected server:', serverInfo.name, '(' + cfg.server + ')')
 	console.log('[config] Resolved URL:', gameUrl)
 
-	// 4. Ensure venv exists
-	const venvOk = await ensureVenv()
-	if (!venvOk) {
-		console.error('[ERROR] Failed to setup Python environment')
-		dialog.showErrorBox(
-			'Setup Failed',
-			'Failed to create Python environment for mitmproxy.\n\n' +
-				'Please check your system has Python 3 installed.'
-		)
-		app.quit()
-		return
-	}
-
-	// 5. Start mitmdump from isolated venv
-	const MITMDUMP_PATH = path.join(VENV_DIR, 'bin', 'mitmdump')
-	console.log('[mitmdump] Starting from isolated venv...')
-	const mitm = spawn(MITMDUMP_PATH, [
-		'--mode', 'regular',
-		'-p', String(cfg.port),
-		'-s', 'addons.py',
-	], { cwd: MM_DIR })
-
 	mitm.stdout.on('data', d => process.stdout.write(`[mitmdump] ${d}`))
 	mitm.stderr.on('data', d => process.stderr.write(`[mitmdump] ${d}`))
-	mitm.on('exit', code => console.log(`[mitmdump] exited (${code})`))
+	mitm.on('exit', code => {
+		console.log(`[mitmdump] exited (${code})`)
+		if (code !== 0 && code !== null) {
+			dialog.showErrorBox(
+				'Mitmproxy Exited',
+				'Mitmproxy crashed during startup. Unowned gacha elements will not be unlocked.'
+			)
+		}
+	})
 
-	// 6. Wait for proxy
+	// Wait for proxy
 	console.log('[app] Waiting for proxy...')
 	if (!(await waitForProxy(cfg.port))) {
 		console.error('[ERROR] Proxy never started!')

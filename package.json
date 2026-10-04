@@ -1,0 +1,50 @@
+{
+  "name": "majsoul-desktop",
+  "productName": "Mahjong Soul",
+  "version": "1.0.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "NODE_ENV=development electron .",
+    "build": "./build.sh",
+    "build:npm": "NODE_ENV=production electron-builder --linux AppImage"
+  },
+  "devDependencies": {
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.majsoul.desktop",
+    "productName": "Mahjong Soul",
+    "asarUnpack": [
+      "**/*.py",
+      "**/requirements.txt"
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "build_resources"
+    },
+    "files": [
+      "main.js",
+      "MajsoulMax/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "build_resources/extraResources/venv",
+        "to": "venv",
+        "filter": ["**"]
+      },
+      {
+        "from": "MajsoulMax",
+        "to": "MajsoulMax",
+        "filter": ["**"]
+      }
+    ],
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Game",
+      "synopsis": "Mahjong Soul desktop client with MajsoulMax mod support"
+    }
+  }
+}
