@@ -52,6 +52,14 @@ const DEFAULTS = {
 
 console.log('[setup] Starting mitmproxy & app...')
 
+// IMPORTANT: These switches MUST be set BEFORE app.whenReady() fires
+// They disable ALL certificate verification for proxied HTTPS connections
+app.commandLine.appendSwitch('ignore-certificate-errors')
+app.commandLine.appendSwitch('allow-running-insecure-content')
+app.commandLine.appendSwitch('disable-web-security')
+
+console.log('[cert] Certificate verification disabled for mitmproxy')
+
 // Ensure directories exist
 fs.mkdirSync(CONFIG_DIR, { recursive: true })
 fs.mkdirSync(DATA_DIR, { recursive: true })
@@ -148,11 +156,23 @@ async function showServerSelection() {
 	return null
 }
 
+// A venv is considered complete only if all the binaries we depend on exist
+function venvReady() {
+	return fs.existsSync(path.join(VENV_DIR, 'bin', 'python3')) &&
+		fs.existsSync(path.join(VENV_DIR, 'bin', 'pip')) &&
+		fs.existsSync(path.join(VENV_DIR, 'bin', 'mitmdump'))
+}
+
 // Find or create Python environment
 async function ensurePythonEnv() {
-	// Step 1: Determine which Python interpreter to use
+	// Fast path: venv fully provisioned on a previous run, leave it alone
+	if (venvReady()) {
+		console.log('[setup] Existing venv found, skipping setup')
+		return true
+	}
+
+	// Determine which Python interpreter to use
 	let pythonInterpreter = null
-	let useBundled = false
 
 	if (isDev) {
 		if (!commandExists('python3')) {
@@ -162,46 +182,127 @@ async function ensurePythonEnv() {
 		}
 		pythonInterpreter = 'python3'
 	} else {
-		// Production: try system python first, fallback to bundled
-		if (commandExists('python3')) {
-			console.log('[setup] Using system python3...')
-			pythonInterpreter = 'python3'
-			useBundled = false
-		} else if (BUNDLED_PYTHON_PATH && fs.existsSync(BUNDLED_PYTHON_PATH)) {
-			console.log('[setup] System python3 not found, using bundled Python...')
+		// Production: try bundled python first, fallback to system
+		if (BUNDLED_PYTHON_PATH && fs.existsSync(BUNDLED_PYTHON_PATH)) {
+			console.log('[setup] Using bundled Python...')
 			pythonInterpreter = BUNDLED_PYTHON_PATH
-			useBundled = true
+		} else if (commandExists('python3') && commandExists('pip3')) {
+			console.log('[setup] Bundled Python unavailable, falling back to system Python...')
+			pythonInterpreter = 'python3'
 		} else {
-			console.error('[ERROR] Neither system nor bundled Python available')
+			console.error('[ERROR] Python is not available')
 			dialog.showErrorBox(
 				'Missing Dependency',
-				'Python 3 is required.\n\n' +
-				'Either:\n' +
-				'• Install Python 3 on your system, or\n' +
-				'• Download an AppImage built with bundled Python'
+				'Python is required.\n\n' +
+					'Please ensure both \'python3\' and \'pip\' are installed.\n' +
+					'If you are using an AppImage, please report a bug.'
 			)
 			return false
 		}
 	}
 
-	// Step 2: Create venv if it doesn't exist
-	if (!fs.existsSync(path.join(VENV_DIR, 'bin', 'mitmdump'))) {
+	// Remove any partial/failed venv from previous attempts
+	const expectedVenvPython = path.join(VENV_DIR, 'bin', 'python3')
+	if (fs.existsSync(VENV_DIR) && !fs.existsSync(expectedVenvPython)) {
+		console.log('[setup] Cleaning up partial venv from previous attempt...')
+		fs.rmSync(VENV_DIR, { recursive: true, force: true })
+	}
+
+	// Create venv if it doesn't exist
+	if (!fs.existsSync(expectedVenvPython)) {
 		console.log('[setup] Creating Python venv...')
 		try {
+			// Try without --without-pip first (some standalone builds have ensurepip)
 			execSync(`"${pythonInterpreter}" -m venv "${VENV_DIR}"`, { stdio: 'inherit' })
 		} catch (err) {
-			console.error('[ERROR] Failed to create venv:', err.message)
-			dialog.showErrorBox('Setup Failed', 'Failed to create Python venv. Check your Python installation.')
+			console.warn('[WARN] Standard venv creation failed, trying --without-pip...')
+			try {
+				execSync(`"${pythonInterpreter}" -m venv "${VENV_DIR}" --without-pip`, { stdio: 'inherit' })
+			} catch (err2) {
+				console.error('[ERROR] Failed to create venv:', err2.message)
+				dialog.showErrorBox('Setup Failed', 'Failed to create Python venv.')
+				return false
+			}
+		}
+
+		// Verify venv was created correctly
+		if (!fs.existsSync(expectedVenvPython)) {
+			console.error('[ERROR] Venv creation did not produce expected python3 binary')
+			console.error('[DEBUG] Looking in:', VENV_DIR, 'Contents:')
+			try {
+				const binDir = path.join(VENV_DIR, 'bin')
+				if (fs.existsSync(binDir)) {
+					console.error(fs.readdirSync(binDir).join(', '))
+				} else {
+					console.error('[DEBUG] bin/ directory does not exist')
+				}
+			} catch (readErr) {
+				console.error('[DEBUG] Could not read bin directory:', readErr.message)
+			}
+			dialog.showErrorBox('Setup Failed', 'Venv creation failed - python3 binary not found.')
+			return false
+		}
+
+		// Make sure python3 is executable
+		try {
+			fs.chmodSync(expectedVenvPython, 0o755)
+		} catch (chmodErr) {
+			console.warn('[WARN] Could not chmod python3:', chmodErr.message)
+		}
+
+		// Install pip from bundled wheel (no network required)
+		console.log('[setup] Installing pip from bundled wheel...')
+
+		let pipFiles = []
+		try {
+			const pipDir = path.join(process.resourcesPath, 'pip')
+			if (fs.existsSync(pipDir)) {
+				pipFiles = fs.readdirSync(pipDir).filter(f => f.endsWith('.whl'))
+			}
+		} catch (err) {
+			console.warn('[WARN] Could not read bundled pip directory:', err.message)
+		}
+
+		if (pipFiles.length === 0) {
+			console.error('[ERROR] Bundled pip wheel not found')
+			dialog.showErrorBox('Setup Failed', 'Bundled pip wheel missing.')
+			return false
+		}
+
+		const pipWheelPath = path.join(process.resourcesPath, 'pip', pipFiles[0])
+		console.log('[setup] Found pip wheel:', pipWheelPath)
+
+		try {
+			// Method 1: Use python -m ensurepip (might work with some standalone builds)
+			try {
+				execSync(`"${expectedVenvPython}" -m ensurepip --upgrade`, { stdio: 'inherit' })
+				console.log('[setup] Installed pip via ensurepip')
+			} catch (ensurepipErr) {
+				console.log('[setup] ensurepip not available, trying direct wheel install...')
+
+				// Method 2: Run the wheel as a script
+				execSync(`"${expectedVenvPython}" "${pipWheelPath}"`, {
+					stdio: 'inherit',
+					env: { ...process.env, VIRTUALENV_NO_DOWNLOAD: '1' }
+				})
+			}
+
+			// Verify pip was installed
+			if (!fs.existsSync(path.join(VENV_DIR, 'bin', 'pip'))) {
+				throw new Error('pip binary not found after installation')
+			}
+		} catch (err) {
+			console.error('[ERROR] Failed to install pip:', err.message)
+			dialog.showErrorBox('Setup Failed', 'Failed to install pip from bundled wheel.')
 			return false
 		}
 	}
 
-	// Step 3: Install requirements if mitmproxy is missing
-	const mitmPath = path.join(VENV_DIR, 'bin', 'mitmdump')
+	// Install requirements if mitmproxy is missing
 	const mmDir = getMajsoulMaxDir()
 	const reqPath = path.join(mmDir, 'requirements.txt')
 
-	if (!fs.existsSync(mitmPath) || !fs.existsSync(reqPath)) {
+	if (!venvReady()) {
 		console.log('[setup] Installing mitmproxy requirements...')
 		try {
 			execSync(
@@ -219,7 +320,7 @@ async function ensurePythonEnv() {
 		}
 	}
 
-	// Step 4: Verify final result
+	// Verify final result
 	if (!fs.existsSync(path.join(VENV_DIR, 'bin', 'mitmdump'))) {
 		console.error('[ERROR] mitmdump not found after setup')
 		dialog.showErrorBox('Setup Failed', 'mitmproxy was not installed correctly.')
@@ -229,7 +330,7 @@ async function ensurePythonEnv() {
 	return true
 }
 
-// Get MajsoulMax directory (accounting for deployed resources)
+// Get MajsoulMax directory
 function getMajsoulMaxDir() {
 	if (isDev) return path.join(REPO_DIR, 'MajsoulMax')
 	const src = path.join(process.resourcesPath, 'MajsoulMax')
