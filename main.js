@@ -231,7 +231,7 @@ async function ensurePythonEnv() {
 
 // Get MajsoulMax directory (accounting for deployed resources)
 function getMajsoulMaxDir() {
-	if (isDev) return REPO_DIR
+	if (isDev) return path.join(REPO_DIR, 'MajsoulMax')
 	const src = path.join(process.resourcesPath, 'MajsoulMax')
 	const dst = MM_DIR
 	// In prod, copy if not already deployed
