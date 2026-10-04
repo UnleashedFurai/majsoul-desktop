@@ -31,8 +31,13 @@
 		],
 		"extraResources": [
 			{
-				"from": "build_resources/extraResources/venv",
-				"to": "venv",
+				"from": "build_resources/python",
+				"to": "python",
+				"filter": ["**"]
+			},
+			{
+				"from": "build_resources/pip",
+				"to": "pip",
 				"filter": ["**"]
 			},
 			{
