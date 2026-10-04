@@ -243,13 +243,6 @@ async function ensurePythonEnv() {
 			return false
 		}
 
-		// Make sure python3 is executable
-		try {
-			fs.chmodSync(expectedVenvPython, 0o755)
-		} catch (chmodErr) {
-			console.warn('[WARN] Could not chmod python3:', chmodErr.message)
-		}
-
 		// Install pip from bundled wheel (no network required)
 		console.log('[setup] Installing pip from bundled wheel...')
 
