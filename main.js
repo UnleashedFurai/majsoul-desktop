@@ -19,7 +19,7 @@ const CONFIG_DIR = path.join(
 	'majsoul'
 )
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json')
-const MM_DIR = path.join(DATA_DIR, 'MajsoulMax')
+const MM_DIR = path.join(isDev ? REPO_DIR: DATA_DIR, 'MajsoulMax')
 const VENV_DIR = path.join(DATA_DIR, 'venv')
 const MITMDUMP_PATH = path.join(VENV_DIR, 'bin', 'mitmdump')
 const PACKAGED_MM_DIR = isDev ? null : path.join(process.resourcesPath, 'MajsoulMax')
@@ -220,12 +220,10 @@ async function main() {
 
 	// Start mitmdump from isolated venv
 	console.log('[mitmdump] Starting from isolated venv...')
-	const mitm = spawn(path.join(VENV_DIR, 'bin', 'python'), [
-		path.join(VENV_DIR, 'bin', 'mitmdump'),
+	const mitm = spawn(MITMDUMP_PATH, [
 		'-p', String(cfg.port),
-		'-s', 'addons.py',
-	], { cwd: MM_DIR })
-
+		'-s', 'addons.py'
+	], { cwd: MM_DIR})
 	// Show server selection if needed
 	if (needsServerSelection) {
 		const selectedServer = await showServerSelection()
@@ -249,6 +247,9 @@ async function main() {
 
 	mitm.stdout.on('data', d => process.stdout.write(`[mitmdump] ${d}`))
 	mitm.stderr.on('data', d => process.stderr.write(`[mitmdump] ${d}`))
+	mitm.on('error', err => {
+		console.error('[mitmdump] failed to spawn:', err.message)
+	})
 	mitm.on('exit', code => {
 		console.log(`[mitmdump] exited (${code})`)
 		if (code !== 0 && code !== null) {
