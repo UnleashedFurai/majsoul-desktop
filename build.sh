@@ -1,26 +1,22 @@
 #!/bin/sh
 set -e
 
-VERSION="1.0.0"
-VENV_DIR="./build_resources/venv"
-MM_DIR="./MajsoulMax"
+PYTHON_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.14.8+20261003-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+PYTHON_DIR="./build_resources/python"
 
-echo "[build] Cleaning up old builds..."
-rm -rf release/ build_resources/ extraResources/ dist/
+echo "[build] Cleaning old builds..."
+rm -rf release/ dist/
 
-echo "[build] Creating venv..."
-python3 -m venv "$VENV_DIR"
+# Only fetch Python if missing
+if [ ! -d "$PYTHON_DIR" ]; then
+	echo "[build] Fetching standalone Python..."
+	mkdir -p "$PYTHON_DIR"
+	curl -L "$PYTHON_URL" | tar -xz -C "$PYTHON_DIR"
+else
+	echo "[build] Python already cached, skipping download..."
+fi
 
-echo "[build] Installing dependencies..."
-. "$VENV_DIR/bin/activate"
-pip install -r "$MM_DIR/requirements.txt"
-deactivate
-
-echo "[build] Copying venv to extraResources..."
-mkdir -p build_resources/extraResources
-cp -r "$VENV_DIR" build_resources/extraResources/
-
-echo "[build] Building AppImage with electron-builder..."
+echo "[build] Building AppImage..."
 export NODE_ENV=production
 npm run build:npm
 

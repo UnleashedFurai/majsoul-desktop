@@ -19,11 +19,13 @@ const CONFIG_DIR = path.join(
 	'majsoul'
 )
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json')
-const MM_DIR = path.join(isDev ? REPO_DIR: DATA_DIR, 'MajsoulMax')
+const MM_DIR = path.join(isDev ? REPO_DIR : DATA_DIR, 'MajsoulMax')
 const VENV_DIR = path.join(DATA_DIR, 'venv')
-const MITMDUMP_PATH = path.join(VENV_DIR, 'bin', 'mitmdump')
-const PACKAGED_MM_DIR = isDev ? null : path.join(process.resourcesPath, 'MajsoulMax')
-const PACKAGED_VENV_DIR = isDev ? null : path.join(process.resourcesPath, 'venv')
+
+// Bundled Python path (only in production)
+const BUNDLED_PYTHON_PATH = isDev
+	? null
+	: path.join(process.resourcesPath, 'python', 'bin', 'python3')
 
 // Server definitions
 const SERVERS = {
@@ -53,14 +55,15 @@ console.log('[setup] Starting mitmproxy & app...')
 // Ensure directories exist
 fs.mkdirSync(CONFIG_DIR, { recursive: true })
 fs.mkdirSync(DATA_DIR, { recursive: true })
-fs.mkdirSync(VENV_DIR, { recursive: true })
 
-// Helper to get unpacked resource paths
-function getUnpackedResourcePath(subPath) {
-	if (isDev) {
-		return path.join(REPO_DIR, subPath)
+// Helper to check if a command exists
+function commandExists(cmd) {
+	try {
+		execSync(`command -v "${cmd}"`, { stdio: 'ignore' })
+		return true
+	} catch {
+		return false
 	}
-	return path.join(process.resourcesPath, subPath)
 }
 
 // Recursively copy a directory
@@ -69,26 +72,18 @@ function copyDir(src, dest) {
 	for (const entry of fs.readdirSync(src, { withFileTypes: true})) {
 		const s = path.join(src, entry.name)
 		const d = path.join(dest, entry.name)
-		if ( entry.isDirectory()) copyDir(s, d)
+		if (entry.isDirectory()) copyDir(s, d)
 		else fs.copyFileSync(s, d)
 	}
 }
 
-// Deploy bundled Majsoulmax + venv to the writable data dir on first run
+// Deploy bundled MajsoulMax
 function deployResources() {
-	if (isDev) {
-		// In dev, just use the repo copy directly
-		return
-	}
+	if (isDev) return
 
-	// In venv, copy if missing
-	if (!fs.existsSync(MITMDUMP_PATH)) {
-		console.log('[setup] Deploying bundled venv to data dir...')
-		copyDir(PACKAGED_VENV_DIR, VENV_DIR)
-	}
 	if (!fs.existsSync(path.join(MM_DIR, 'addons.py'))) {
 		console.log('[setup] Deploying MajsoulMax to data dir...')
-		copyDir(PACKAGED_MM_DIR, MM_DIR)
+		copyDir(path.join(process.resourcesPath, 'MajsoulMax'), MM_DIR)
 	}
 }
 
@@ -102,15 +97,15 @@ function loadConfig() {
 
 			// Backwards compat
 			if (cfg.url && !cfg.server) {
-				if (cfg.url.includes('yo-star')) cfg.server = 'global'
+				if (cfg.url.includes('yo-star')) cfg.server = 'en'
 				else if (cfg.url.includes('game.mahjongsoul.com')) cfg.server = 'jp'
 				else if (cfg.url.includes('maj-soul.com')) cfg.server = 'cn'
 				delete cfg.url
 			}
 
 			if (!SERVERS[cfg.server]) {
-				console.warn('[WARN] Invalid server "' + cfg.server + '" in config, resetting to US')
-				cfg.server = 'us'
+				console.warn('[WARN] Invalid server "' + cfg.server + '" in config, resetting to EN')
+				cfg.server = 'en'
 			}
 
 			return cfg
@@ -124,8 +119,7 @@ function loadConfig() {
 
 // Check if this is first run
 function isFirstRun(cfg) {
-	if (!fs.existsSync(CONFIG_FILE)) return true
-	return false
+	return !fs.existsSync(CONFIG_FILE)
 }
 
 // Server selection dialog
@@ -140,33 +134,112 @@ async function showServerSelection() {
 		buttons: [
 			'Japan (JP)',
 			'China (CN)',
-			'Global (US)',
+			'Global (EN)',
 		],
-		defaultId: 0,
+		defaultId: 2,
 		cancelId: -1,
 	})
 
 	if (result.response >= 0 && result.response < 3) {
-		const selectedServer = Object.keys(SERVERS)[result.response]
-		return selectedServer
+		return Object.keys(SERVERS)[result.response]
 	}
 
 	console.error('[ERROR] User closed dialog without selecting server')
 	return null
 }
 
-// Create venv if needed
-async function ensureVenv() {
+// Find or create Python environment
+async function ensurePythonEnv() {
+	// Step 1: Determine which Python interpreter to use
+	let pythonInterpreter = null
+	let useBundled = false
+
 	if (isDev) {
-		if (!fs.existsSync(path.join(VENV_DIR, 'bin', 'mitmdump'))) {
-			console.log('[setup] Creating Python venv...')
-			execSync(`python3 -m venv "${VENV_DIR}"`, { stdio: 'inherit' })
-			execSync(`${path.join(VENV_DIR, 'bin', 'pip')} install -r "${path.join(REPO_DIR, 'MajsoulMax', 'requirements.txt')}"`, {stdio: 'inherit' })
+		if (!commandExists('python3')) {
+			console.error('[ERROR] python3 not found on system')
+			dialog.showErrorBox('Missing Dependency', 'python3 is not installed on your system.')
+			return false
 		}
-		return true
+		pythonInterpreter = 'python3'
+	} else {
+		// Production: try system python first, fallback to bundled
+		if (commandExists('python3')) {
+			console.log('[setup] Using system python3...')
+			pythonInterpreter = 'python3'
+			useBundled = false
+		} else if (BUNDLED_PYTHON_PATH && fs.existsSync(BUNDLED_PYTHON_PATH)) {
+			console.log('[setup] System python3 not found, using bundled Python...')
+			pythonInterpreter = BUNDLED_PYTHON_PATH
+			useBundled = true
+		} else {
+			console.error('[ERROR] Neither system nor bundled Python available')
+			dialog.showErrorBox(
+				'Missing Dependency',
+				'Python 3 is required.\n\n' +
+				'Either:\n' +
+				'• Install Python 3 on your system, or\n' +
+				'• Download an AppImage built with bundled Python'
+			)
+			return false
+		}
 	}
-	// prod: deployResources() handled this
-	return fs.existsSync(path.join(VENV_DIR, 'bin', 'mitmdump'))
+
+	// Step 2: Create venv if it doesn't exist
+	if (!fs.existsSync(path.join(VENV_DIR, 'bin', 'mitmdump'))) {
+		console.log('[setup] Creating Python venv...')
+		try {
+			execSync(`"${pythonInterpreter}" -m venv "${VENV_DIR}"`, { stdio: 'inherit' })
+		} catch (err) {
+			console.error('[ERROR] Failed to create venv:', err.message)
+			dialog.showErrorBox('Setup Failed', 'Failed to create Python venv. Check your Python installation.')
+			return false
+		}
+	}
+
+	// Step 3: Install requirements if mitmproxy is missing
+	const mitmPath = path.join(VENV_DIR, 'bin', 'mitmdump')
+	const mmDir = getMajsoulMaxDir()
+	const reqPath = path.join(mmDir, 'requirements.txt')
+
+	if (!fs.existsSync(mitmPath) || !fs.existsSync(reqPath)) {
+		console.log('[setup] Installing mitmproxy requirements...')
+		try {
+			execSync(
+				`"${VENV_DIR}/bin/pip" install --upgrade pip`,
+				{ stdio: 'inherit' }
+			)
+			execSync(
+				`"${VENV_DIR}/bin/pip" install -r "${reqPath}"`,
+				{ stdio: 'inherit' }
+			)
+		} catch (err) {
+			console.error('[ERROR] Failed to install requirements:', err.message)
+			dialog.showErrorBox('Setup Failed', 'Failed to install mitmproxy dependencies.')
+			return false
+		}
+	}
+
+	// Step 4: Verify final result
+	if (!fs.existsSync(path.join(VENV_DIR, 'bin', 'mitmdump'))) {
+		console.error('[ERROR] mitmdump not found after setup')
+		dialog.showErrorBox('Setup Failed', 'mitmproxy was not installed correctly.')
+		return false
+	}
+
+	return true
+}
+
+// Get MajsoulMax directory (accounting for deployed resources)
+function getMajsoulMaxDir() {
+	if (isDev) return REPO_DIR
+	const src = path.join(process.resourcesPath, 'MajsoulMax')
+	const dst = MM_DIR
+	// In prod, copy if not already deployed
+	if (!fs.existsSync(path.join(dst, 'addons.py'))) {
+		fs.mkdirSync(dst, { recursive: true })
+		copyDir(src, dst)
+	}
+	return dst
 }
 
 function portOpen(port) {
@@ -202,48 +275,22 @@ async function main() {
 	let cfg = loadConfig()
 	const needsServerSelection = isFirstRun(cfg)
 
-	// Deploy writable copies of Majsoulmax and venv (prod)
+	// Deploy MajsoulMax (no venv deployment anymore)
 	deployResources()
 
-	// Ensure venv exists
-	const venvOk = await ensureVenv()
-	if (!venvOk) {
-		console.error('[ERROR] Failed to setup Python environment')
-		dialog.showErrorBox(
-			'Setup Failed',
-			'Failed to create Python environment for mitmproxy.\n\n' +
-				'Please check your system has Python 3 installed.'
-		)
+	// Ensure Python environment exists
+	const envOk = await ensurePythonEnv()
+	if (!envOk) {
 		app.quit()
 		return
 	}
 
-	// Start mitmdump from isolated venv
-	console.log('[mitmdump] Starting from isolated venv...')
-	const mitm = spawn(MITMDUMP_PATH, [
+	// Start mitmdump from the venv
+	console.log('[mitmdump] Starting proxy...')
+	const mitm = spawn(path.join(VENV_DIR, 'bin', 'mitmdump'), [
 		'-p', String(cfg.port),
 		'-s', 'addons.py'
-	], { cwd: MM_DIR})
-	// Show server selection if needed
-	if (needsServerSelection) {
-		const selectedServer = await showServerSelection()
-		if (!selectedServer) {
-			console.error('[ERROR] No server selected, exiting')
-			app.quit()
-			return
-		}
-
-		cfg.server = selectedServer
-		console.log('[config] User selected:', SERVERS[cfg.server].name)
-		fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2))
-	}
-
-	// Get resolved URL
-	const serverInfo = SERVERS[cfg.server]
-	const gameUrl = serverInfo.url
-
-	console.log('[config] Selected server:', serverInfo.name, '(' + cfg.server + ')')
-	console.log('[config] Resolved URL:', gameUrl)
+	], { cwd: MM_DIR })
 
 	mitm.stdout.on('data', d => process.stdout.write(`[mitmdump] ${d}`))
 	mitm.stderr.on('data', d => process.stderr.write(`[mitmdump] ${d}`))
@@ -259,6 +306,28 @@ async function main() {
 			)
 		}
 	})
+
+	// Show server selection if needed
+	if (needsServerSelection) {
+		const selectedServer = await showServerSelection()
+		if (!selectedServer) {
+			console.error('[ERROR] No server selected, exiting')
+			mitm.kill('SIGKILL')
+			app.quit()
+			return
+		}
+
+		cfg.server = selectedServer
+		console.log('[config] User selected:', SERVERS[cfg.server].name)
+		fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2))
+	}
+
+	// Get resolved URL
+	const serverInfo = SERVERS[cfg.server]
+	const gameUrl = serverInfo.url
+
+	console.log('[config] Selected server:', serverInfo.name, '(' + cfg.server + ')')
+	console.log('[config] Resolved URL:', gameUrl)
 
 	// Wait for proxy
 	console.log('[app] Waiting for proxy...')

@@ -7,7 +7,8 @@
 	  "start": "NODE_ENV=development electron .",
 	  "build": "sh build.sh",
 	  "build:npm": "NODE_ENV=production electron-builder --linux AppImage",
-	  "clean": "rm -rf release/ build_resources/ extraResources/ dist/"
+	  "clean": "rm -rf release/ dist/",
+	  "clean:full": "rm -rf release/ dist/ build_resources/"
   },
   "devDependencies": {
 	"electron": "^44.5.1",
