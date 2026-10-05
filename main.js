@@ -424,9 +424,26 @@ process.on('unhandledRejection', (reason, p) => {
 
 // Main function
 async function main() {
+	// Parse --server cli arg (priority higher than config)
+	const serverArgIndex = process.argv.indexOf('--server')
+	const cliServer = serverArgIndex >= 0 && serverArgIndex < process.argv.length -1 ? process.argv[serverArgIndex + 1] : null
+
+	// Validate server arg
+	if (cliServer && !SERVERS[cliServer]) {
+		console.error(`[ERROR] Invalid server "${cliServer}", must be one of: ${Object.keys(SERVERS).join(', ')}`)
+		app.quit()
+		return
+	}
+
 	// Load config
 	let cfg = loadConfig()
-	const needsServerSelection = isFirstRun(cfg)
+	// Server selection skipped if passed via cli
+	const needsServerSelection = isFirstRun(cfg) && !cliServer
+
+	if (cliServer) {
+		cfg.server = cliServer
+		console.log('[config] Server overridden via cli:', SERVERS[cfg.server].name)
+	}
 
 	// Deploy MajsoulMax
 	deployResources()
