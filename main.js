@@ -26,7 +26,7 @@ let RUNTIME_DIR, MM_DIR, VENV_DIR
 if (isDev) {
 	RUNTIME_DIR = REPO_DIR
 	MM_DIR = path.join(REPO_DIR, 'MajsoulMax')
-	VENV_DIR = path.join(REPO_DIR, '.venv') // gitignore this
+	VENV_DIR = path.join(REPO_DIR, 'venv')
 } else {
 	RUNTIME_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'majsoul-'))
 	MM_DIR = path.join(RUNTIME_DIR, 'MajsoulMax')
@@ -254,58 +254,83 @@ async function ensurePythonEnv() {
 		return false
 	}
 
-	// Make sure python3 is executable
-	try {
-		fs.chmodSync(expectedVenvPython, 0o755)
-	} catch (chmodErr) {
-		console.warn('[WARN] Could not chmod python3:', chmodErr.message)
-	}
+	// Install pip
+	if (!isDev) {
+		// PRODUCTION: use bundled wheel (no network required)
+		console.log('[setup] Installing pip from bundled wheel...')
 
-	// Install pip from bundled wheel (no network required)
-	console.log('[setup] Installing pip from bundled wheel...')
-
-	let pipFiles = []
-	try {
-		const pipDir = path.join(process.resourcesPath, 'pip')
-		if (fs.existsSync(pipDir)) {
-			pipFiles = fs.readdirSync(pipDir).filter(f => f.endsWith('.whl'))
-		}
-	} catch (err) {
-		console.warn('[WARN] Could not read bundled pip directory:', err.message)
-	}
-
-	if (pipFiles.length === 0) {
-		console.error('[ERROR] Bundled pip wheel not found')
-		dialog.showErrorBox('Setup Failed', 'Bundled pip wheel missing.')
-		return false
-	}
-
-	const pipWheelPath = path.join(process.resourcesPath, 'pip', pipFiles[0])
-	console.log('[setup] Found pip wheel:', pipWheelPath)
-
-	try {
-		// Method 1: Use python -m ensurepip (might work with some standalone builds)
+		let pipFiles = []
 		try {
+			const pipDir = path.join(process.resourcesPath, 'pip')
+			if (fs.existsSync(pipDir)) {
+				pipFiles = fs.readdirSync(pipDir).filter(f => f.endsWith('.whl'))
+			}
+		} catch (err) {
+			console.warn('[WARN] Could not read bundled pip directory:', err.message)
+		}
+
+		if (pipFiles.length === 0) {
+			console.error('[ERROR] Bundled pip wheel not found')
+			dialog.showErrorBox('Setup Failed', 'Bundled pip wheel missing.')
+			return false
+		}
+
+		const pipWheelPath = path.join(process.resourcesPath, 'pip', pipFiles[0])
+		console.log('[setup] Found pip wheel:', pipWheelPath)
+
+		try {
+			// Method 1: Use python -m ensurepip (might work with some standalone builds)
+			try {
+				execSync(`"${expectedVenvPython}" -m ensurepip --upgrade`, { stdio: 'inherit' })
+				console.log('[setup] Installed pip via ensurepip')
+			} catch (ensurepipErr) {
+				console.log('[setup] ensurepip not available, trying direct wheel install...')
+
+				// Method 2: Run the wheel as a script
+				execSync(`"${expectedVenvPython}" "${pipWheelPath}"`, {
+					stdio: 'inherit',
+					env: { ...process.env, VIRTUALENV_NO_DOWNLOAD: '1' }
+				})
+			}
+
+			// Verify pip was installed
+			if (!fs.existsSync(path.join(VENV_DIR, 'bin', 'pip'))) {
+				throw new Error('pip binary not found after installation')
+			}
+		} catch (err) {
+			console.error('[ERROR] Failed to install pip:', err.message)
+			dialog.showErrorBox('Setup Failed', 'Failed to install pip from bundled wheel.')
+			return false
+		}
+	} else {
+		// DEV MODE: try ensurepip first (bundled with Python), then get-pip.py
+		console.log('[setup] Bootstrapping pip in dev venv...')
+		
+		try {
+			// Try ensurepip (comes bundled with Python, works even if system has no pip)
 			execSync(`"${expectedVenvPython}" -m ensurepip --upgrade`, { stdio: 'inherit' })
-			console.log('[setup] Installed pip via ensurepip')
+			console.log('[setup] Pip bootstrapped via ensurepip')
 		} catch (ensurepipErr) {
-			console.log('[setup] ensurepip not available, trying direct wheel install...')
-
-			// Method 2: Run the wheel as a script
-			execSync(`"${expectedVenvPython}" "${pipWheelPath}"`, {
-				stdio: 'inherit',
-				env: { ...process.env, VIRTUALENV_NO_DOWNLOAD: '1' }
-			})
+			console.log('[setup] ensurepip failed, trying get-pip.py...')
+			
+			// Download and run get-pip.py
+			try {
+				const getpipScript = path.join(os.tmpdir(), 'get-pip.py')
+				execSync(`curl -o "${getpipScript}" https://bootstrap.pypa.io/get-pip.py`, { stdio: 'inherit' })
+				execSync(`"${expectedVenvPython}" "${getpipScript}"`, { stdio: 'inherit' })
+				console.log('[setup] Pip bootstrapped via get-pip.py')
+			} catch (getpipErr) {
+				console.error('[ERROR] Failed to bootstrap pip in dev mode:', getpipErr.message)
+				dialog.showErrorBox(
+					'Setup Failed',
+					'Failed to bootstrap pip. Please install pip:\n\n' +
+						'Arch:   pacman -S python-pip\n' +
+						'Ubuntu: apt install python3-pip\n' +
+						'Fedora: dnf install python3-pip'
+				)
+				return false
+			}
 		}
-
-		// Verify pip was installed
-		if (!fs.existsSync(path.join(VENV_DIR, 'bin', 'pip'))) {
-			throw new Error('pip binary not found after installation')
-		}
-	} catch (err) {
-		console.error('[ERROR] Failed to install pip:', err.message)
-		dialog.showErrorBox('Setup Failed', 'Failed to install pip from bundled wheel.')
-		return false
 	}
 
 	// Install requirements
