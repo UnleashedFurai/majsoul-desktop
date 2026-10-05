@@ -6,9 +6,9 @@
 	"scripts": {
 		"start": "NODE_ENV=development electron .",
 		"build": "npm run build:all",
-		"build:npm": "NODE_ENV=production electron-builder --linux AppImage",
+		"build:appimage": "NODE_ENV=production electron-builder --linux AppImage",
 		"build:tar": "NODE_ENV=production electron-builder --linux tar.gz",
-		"build:all": "sh build.sh npm && sh build.sh tar",
+		"build:all": "sh build.sh appimage && sh build.sh tar",
 		"clean": "rm -rf release/ dist/",
 		"clean:full": "rm -rf release/ dist/ build_resources/"
 	},
