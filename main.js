@@ -120,7 +120,7 @@ function deployResources() {
 	if (isDev) return
 
 	// The AppImage mount is read-only, copy MajsoulMax to runtime dir
-	console.log(`[setup] Deploying MajsoulMax to ${MM_DIR}...`)
+	console.log(`[setup] Deploying MajsoulMax...`)
 	copyDir(path.join(process.resourcesPath, 'MajsoulMax'), MM_DIR)
 }
 
