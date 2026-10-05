@@ -10,17 +10,28 @@ const path = require('path')
 const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production'
 
 const REPO_DIR = __dirname
-const DATA_DIR = path.join(
-	process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'),
-	'majsoul'
-)
 const CONFIG_DIR = path.join(
 	process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
 	'majsoul'
 )
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json')
-const MM_DIR = path.join(isDev ? REPO_DIR : DATA_DIR, 'MajsoulMax')
-const VENV_DIR = path.join(DATA_DIR, 'venv')
+
+// Runtime layout:
+//   - Dev:   persistent venv + repo MajsoulMax (fast iteration)
+//   - Prod:  throwaway temp dir per launch. The bundled standalone Python
+//            hardcodes its stdlib location relative to the AppImage mount
+//            point, which changes on every launch, so any venv built from
+//            it is unusable the next run anyway.
+let RUNTIME_DIR, MM_DIR, VENV_DIR
+if (isDev) {
+	RUNTIME_DIR = REPO_DIR
+	MM_DIR = path.join(REPO_DIR, 'MajsoulMax')
+	VENV_DIR = path.join(REPO_DIR, '.venv') // gitignore this
+} else {
+	RUNTIME_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'majsoul-'))
+	MM_DIR = path.join(RUNTIME_DIR, 'MajsoulMax')
+	VENV_DIR = path.join(RUNTIME_DIR, 'venv')
+}
 
 // Bundled Python path (only in production)
 const BUNDLED_PYTHON_PATH = isDev
@@ -62,7 +73,6 @@ console.log('[cert] Certificate verification disabled for mitmproxy')
 
 // Ensure directories exist
 fs.mkdirSync(CONFIG_DIR, { recursive: true })
-fs.mkdirSync(DATA_DIR, { recursive: true })
 
 // Helper to check if a command exists
 function commandExists(cmd) {
@@ -76,8 +86,8 @@ function commandExists(cmd) {
 
 // Recursively copy a directory
 function copyDir(src, dest) {
-	fs.mkdirSync(dest, { recursive: true})
-	for (const entry of fs.readdirSync(src, { withFileTypes: true})) {
+	fs.mkdirSync(dest, { recursive: true })
+	for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
 		const s = path.join(src, entry.name)
 		const d = path.join(dest, entry.name)
 		if (entry.isDirectory()) copyDir(s, d)
@@ -89,10 +99,9 @@ function copyDir(src, dest) {
 function deployResources() {
 	if (isDev) return
 
-	if (!fs.existsSync(path.join(MM_DIR, 'addons.py'))) {
-		console.log('[setup] Deploying MajsoulMax to data dir...')
-		copyDir(path.join(process.resourcesPath, 'MajsoulMax'), MM_DIR)
-	}
+	// The AppImage mount is read-only, copy MajsoulMax to runtime dir
+	console.log('[setup] Deploying MajsoulMax to temp dir...')
+	copyDir(path.join(process.resourcesPath, 'MajsoulMax'), MM_DIR)
 }
 
 // Load config
@@ -165,11 +174,13 @@ function venvReady() {
 
 // Find or create Python environment
 async function ensurePythonEnv() {
-	// Fast path: venv fully provisioned on a previous run, leave it alone
-	if (venvReady()) {
-		console.log('[setup] Existing venv found, skipping setup')
+	// Fast path: dev mode, venv persists across runs
+	if (isDev && venvReady()) {
+		console.log('[setup] Existing dev venv found, skipping setup')
 		return true
 	}
+
+	// In production, venv is always fresh (temp dir), so no need to check
 
 	// Determine which Python interpreter to use
 	let pythonInterpreter = null
@@ -201,116 +212,118 @@ async function ensurePythonEnv() {
 		}
 	}
 
-	// Remove any partial/failed venv from previous attempts
 	const expectedVenvPython = path.join(VENV_DIR, 'bin', 'python3')
-	if (fs.existsSync(VENV_DIR) && !fs.existsSync(expectedVenvPython)) {
-		console.log('[setup] Cleaning up partial venv from previous attempt...')
+
+	// Remove any partial/old venv
+	if (fs.existsSync(VENV_DIR)) {
+		console.log('[setup] Removing old venv...')
 		fs.rmSync(VENV_DIR, { recursive: true, force: true })
 	}
 
-	// Create venv if it doesn't exist
-	if (!fs.existsSync(expectedVenvPython)) {
-		console.log('[setup] Creating Python venv...')
-		try {
-			// Try without --without-pip first (some standalone builds have ensurepip)
-			execSync(`"${pythonInterpreter}" -m venv "${VENV_DIR}"`, { stdio: 'inherit' })
-		} catch (err) {
-			console.warn('[WARN] Standard venv creation failed, trying --without-pip...')
-			try {
-				execSync(`"${pythonInterpreter}" -m venv "${VENV_DIR}" --without-pip`, { stdio: 'inherit' })
-			} catch (err2) {
-				console.error('[ERROR] Failed to create venv:', err2.message)
-				dialog.showErrorBox('Setup Failed', 'Failed to create Python venv.')
-				return false
-			}
-		}
+	// Create venv
+	console.log('[setup] Creating Python venv...')
 
-		// Verify venv was created correctly
+	const venvFlags = isDev ? [] : ['--copies']  // Only in production
+
+	try {
+		execSync(`"${pythonInterpreter}" -m venv ${venvFlags.join(' ')} "${VENV_DIR}"`, { stdio: 'inherit' })
+
 		if (!fs.existsSync(expectedVenvPython)) {
-			console.error('[ERROR] Venv creation did not produce expected python3 binary')
-			console.error('[DEBUG] Looking in:', VENV_DIR, 'Contents:')
-			try {
-				const binDir = path.join(VENV_DIR, 'bin')
-				if (fs.existsSync(binDir)) {
-					console.error(fs.readdirSync(binDir).join(', '))
-				} else {
-					console.error('[DEBUG] bin/ directory does not exist')
-				}
-			} catch (readErr) {
-				console.error('[DEBUG] Could not read bin directory:', readErr.message)
-			}
-			dialog.showErrorBox('Setup Failed', 'Venv creation failed - python3 binary not found.')
-			return false
+			throw new Error('Venv python3 not found after creation')
 		}
-
-		// Install pip from bundled wheel (no network required)
-		console.log('[setup] Installing pip from bundled wheel...')
-
-		let pipFiles = []
-		try {
-			const pipDir = path.join(process.resourcesPath, 'pip')
-			if (fs.existsSync(pipDir)) {
-				pipFiles = fs.readdirSync(pipDir).filter(f => f.endsWith('.whl'))
-			}
-		} catch (err) {
-			console.warn('[WARN] Could not read bundled pip directory:', err.message)
-		}
-
-		if (pipFiles.length === 0) {
-			console.error('[ERROR] Bundled pip wheel not found')
-			dialog.showErrorBox('Setup Failed', 'Bundled pip wheel missing.')
-			return false
-		}
-
-		const pipWheelPath = path.join(process.resourcesPath, 'pip', pipFiles[0])
-		console.log('[setup] Found pip wheel:', pipWheelPath)
-
-		try {
-			// Method 1: Use python -m ensurepip (might work with some standalone builds)
-			try {
-				execSync(`"${expectedVenvPython}" -m ensurepip --upgrade`, { stdio: 'inherit' })
-				console.log('[setup] Installed pip via ensurepip')
-			} catch (ensurepipErr) {
-				console.log('[setup] ensurepip not available, trying direct wheel install...')
-
-				// Method 2: Run the wheel as a script
-				execSync(`"${expectedVenvPython}" "${pipWheelPath}"`, {
-					stdio: 'inherit',
-					env: { ...process.env, VIRTUALENV_NO_DOWNLOAD: '1' }
-				})
-			}
-
-			// Verify pip was installed
-			if (!fs.existsSync(path.join(VENV_DIR, 'bin', 'pip'))) {
-				throw new Error('pip binary not found after installation')
-			}
-		} catch (err) {
-			console.error('[ERROR] Failed to install pip:', err.message)
-			dialog.showErrorBox('Setup Failed', 'Failed to install pip from bundled wheel.')
-			return false
-		}
+	} catch (err) {
+		console.warn('[WARN] --copies failed, retrying without it...')
+		execSync(`"${pythonInterpreter}" -m venv "${VENV_DIR}"`, { stdio: 'inherit' })
 	}
 
-	// Install requirements if mitmproxy is missing
-	const mmDir = getMajsoulMaxDir()
-	const reqPath = path.join(mmDir, 'requirements.txt')
-
-	if (!venvReady()) {
-		console.log('[setup] Installing mitmproxy requirements...')
+	// Verify venv was created correctly
+	if (!fs.existsSync(expectedVenvPython)) {
+		console.error('[ERROR] Venv creation did not produce expected python3 binary')
+		console.error('[DEBUG] Looking in:', VENV_DIR, 'Contents:')
 		try {
-			execSync(
-				`"${VENV_DIR}/bin/pip" install --upgrade pip`,
-				{ stdio: 'inherit' }
-			)
-			execSync(
-				`"${VENV_DIR}/bin/pip" install -r "${reqPath}"`,
-				{ stdio: 'inherit' }
-			)
-		} catch (err) {
-			console.error('[ERROR] Failed to install requirements:', err.message)
-			dialog.showErrorBox('Setup Failed', 'Failed to install mitmproxy dependencies.')
-			return false
+			const binDir = path.join(VENV_DIR, 'bin')
+			if (fs.existsSync(binDir)) {
+				console.error(fs.readdirSync(binDir).join(', '))
+			} else {
+				console.error('[DEBUG] bin/ directory does not exist')
+			}
+		} catch (readErr) {
+			console.error('[DEBUG] Could not read bin directory:', readErr.message)
 		}
+		dialog.showErrorBox('Setup Failed', 'Venv creation failed - python3 binary not found.')
+		return false
+	}
+
+	// Make sure python3 is executable
+	try {
+		fs.chmodSync(expectedVenvPython, 0o755)
+	} catch (chmodErr) {
+		console.warn('[WARN] Could not chmod python3:', chmodErr.message)
+	}
+
+	// Install pip from bundled wheel (no network required)
+	console.log('[setup] Installing pip from bundled wheel...')
+
+	let pipFiles = []
+	try {
+		const pipDir = path.join(process.resourcesPath, 'pip')
+		if (fs.existsSync(pipDir)) {
+			pipFiles = fs.readdirSync(pipDir).filter(f => f.endsWith('.whl'))
+		}
+	} catch (err) {
+		console.warn('[WARN] Could not read bundled pip directory:', err.message)
+	}
+
+	if (pipFiles.length === 0) {
+		console.error('[ERROR] Bundled pip wheel not found')
+		dialog.showErrorBox('Setup Failed', 'Bundled pip wheel missing.')
+		return false
+	}
+
+	const pipWheelPath = path.join(process.resourcesPath, 'pip', pipFiles[0])
+	console.log('[setup] Found pip wheel:', pipWheelPath)
+
+	try {
+		// Method 1: Use python -m ensurepip (might work with some standalone builds)
+		try {
+			execSync(`"${expectedVenvPython}" -m ensurepip --upgrade`, { stdio: 'inherit' })
+			console.log('[setup] Installed pip via ensurepip')
+		} catch (ensurepipErr) {
+			console.log('[setup] ensurepip not available, trying direct wheel install...')
+
+			// Method 2: Run the wheel as a script
+			execSync(`"${expectedVenvPython}" "${pipWheelPath}"`, {
+				stdio: 'inherit',
+				env: { ...process.env, VIRTUALENV_NO_DOWNLOAD: '1' }
+			})
+		}
+
+		// Verify pip was installed
+		if (!fs.existsSync(path.join(VENV_DIR, 'bin', 'pip'))) {
+			throw new Error('pip binary not found after installation')
+		}
+	} catch (err) {
+		console.error('[ERROR] Failed to install pip:', err.message)
+		dialog.showErrorBox('Setup Failed', 'Failed to install pip from bundled wheel.')
+		return false
+	}
+
+	// Install requirements
+	console.log('[setup] Installing mitmproxy requirements...')
+	const reqPath = path.join(MM_DIR, 'requirements.txt')
+	try {
+		execSync(
+			`"${VENV_DIR}/bin/pip" install --upgrade pip`,
+			{ stdio: 'inherit' }
+		)
+		execSync(
+			`"${VENV_DIR}/bin/pip" install -r "${reqPath}"`,
+			{ stdio: 'inherit' }
+		)
+	} catch (err) {
+		console.error('[ERROR] Failed to install requirements:', err.message)
+		dialog.showErrorBox('Setup Failed', 'Failed to install mitmproxy dependencies.')
+		return false
 	}
 
 	// Verify final result
@@ -321,19 +334,6 @@ async function ensurePythonEnv() {
 	}
 
 	return true
-}
-
-// Get MajsoulMax directory
-function getMajsoulMaxDir() {
-	if (isDev) return path.join(REPO_DIR, 'MajsoulMax')
-	const src = path.join(process.resourcesPath, 'MajsoulMax')
-	const dst = MM_DIR
-	// In prod, copy if not already deployed
-	if (!fs.existsSync(path.join(dst, 'addons.py'))) {
-		fs.mkdirSync(dst, { recursive: true })
-		copyDir(src, dst)
-	}
-	return dst
 }
 
 function portOpen(port) {
@@ -369,7 +369,7 @@ async function main() {
 	let cfg = loadConfig()
 	const needsServerSelection = isFirstRun(cfg)
 
-	// Deploy MajsoulMax (no venv deployment anymore)
+	// Deploy MajsoulMax
 	deployResources()
 
 	// Ensure Python environment exists
@@ -521,6 +521,15 @@ async function main() {
 	app.on('before-quit', () => {
 		console.log('[quit] Shutting down...')
 		mitm && mitm.kill('SIGTERM')
+
+		// Remove the per-run temp dir (prod only)
+		if (!isDev) {
+			try {
+				fs.rmSync(RUNTIME_DIR, { recursive: true, force: true })
+			} catch (err) {
+				console.warn('[quit] Could not clean up temp dir:', err.message)
+			}
+		}
 	})
 }
 
