@@ -7,8 +7,12 @@ PIP_URL="https://files.pythonhosted.org/packages/py3/p/pip/pip-24.3.1-py3-none-a
 PIP_DIR="./build_resources/pip"
 PIP_FILE="pip-24.3.1-py3-none-any.whl"
 
-echo "[build] Cleaning old builds..."
-rm -rf release/ dist/
+TARGET="${1:-}"
+
+if [ -z "$TARGET" ]; then
+	echo "No target speciffied. Exiting."
+	exit 1
+fi
 
 # Fetch Python if missing
 if [ ! -d "$PYTHON_DIR" ]; then
@@ -35,8 +39,8 @@ else
 	echo "[build] Pip already cached..."
 fi
 
-echo "[build] Building AppImage..."
+echo "[build] Building $TARGET..."
 export NODE_ENV=production
-npm run build:npm
+npm run build:"$TARGET"
 
-echo "[build] Done! Release files in release/"
+echo "[build] Done!"

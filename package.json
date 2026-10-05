@@ -5,8 +5,10 @@
 	"version": "1.0.0",
 	"scripts": {
 		"start": "NODE_ENV=development electron .",
-		"build": "sh build.sh",
+		"build": "npm run build:all",
 		"build:npm": "NODE_ENV=production electron-builder --linux AppImage",
+		"build:tar": "NODE_ENV=production electron-builder --linux tar.gz",
+		"build:all": "sh build.sh npm && sh build.sh tar",
 		"clean": "rm -rf release/ dist/",
 		"clean:full": "rm -rf release/ dist/ build_resources/"
 	},
@@ -48,7 +50,8 @@
 		],
 		"linux": {
 			"target": [
-				"AppImage"
+				{ "target": "AppImage" },
+				{ "target": "tar.gz" }
 			],
 			"category": "Game",
 			"synopsis": "Mahjong Soul desktop client with MajsoulMax mod support"

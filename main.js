@@ -17,21 +17,41 @@ const CONFIG_DIR = path.join(
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json')
 
 // Runtime layout:
-//   - Dev:   persistent venv + repo MajsoulMax (fast iteration)
-//   - Prod:  throwaway temp dir per launch. The bundled standalone Python
-//            hardcodes its stdlib location relative to the AppImage mount
-//            point, which changes on every launch, so any venv built from
-//            it is unusable the next run anyway.
+//   - Dev:      venv in dev environment
+//   - AppImage: create temporary venv in /tmp
+//   - Tarball:  persistent venv in ~/.local/share/majsoul
+function getRuntimeMode() {
+	if (isDev) return 'dev'
+
+	// Check if running from Appimage
+	if (process.execPath.includes('/tmp/.mount_')) {
+		return 'appimage'
+	}
+
+	return 'tarball'
+}
+
+const RUNTIME_MODE = getRuntimeMode()
+
 let RUNTIME_DIR, MM_DIR, VENV_DIR
-if (isDev) {
+if (RUNTIME_MODE === 'dev') {
 	RUNTIME_DIR = REPO_DIR
 	MM_DIR = path.join(REPO_DIR, 'MajsoulMax')
 	VENV_DIR = path.join(REPO_DIR, 'venv')
-} else {
+} else if (RUNTIME_MODE === 'appimage') {
 	RUNTIME_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'majsoul-'))
 	MM_DIR = path.join(RUNTIME_DIR, 'MajsoulMax')
 	VENV_DIR = path.join(RUNTIME_DIR, 'venv')
+} else {
+	const PERSISTENT_DIR = path.join(os.homedir(), '.local', 'share', 'majsoul')
+	fs.mkdirSync(PERSISTENT_DIR, { recursive: true})
+	RUNTIME_DIR = PERSISTENT_DIR
+	MM_DIR = path.join(PERSISTENT_DIR, 'MajsoulMax')
+	VENV_DIR = path.join(PERSISTENT_DIR, 'venv')
 }
+
+console.log(`[runtime] Mode: ${RUNTIME_MODE}`)
+console.log(`[runtime] Data dir: ${RUNTIME_DIR}`)
 
 // Bundled Python path (only in production)
 const BUNDLED_PYTHON_PATH = isDev
@@ -100,7 +120,7 @@ function deployResources() {
 	if (isDev) return
 
 	// The AppImage mount is read-only, copy MajsoulMax to runtime dir
-	console.log('[setup] Deploying MajsoulMax to temp dir...')
+	console.log(`[setup] Deploying MajsoulMax to ${MM_DIR}...`)
 	copyDir(path.join(process.resourcesPath, 'MajsoulMax'), MM_DIR)
 }
 
@@ -174,13 +194,27 @@ function venvReady() {
 
 // Find or create Python environment
 async function ensurePythonEnv() {
-	// Fast path: dev mode, venv persists across runs
-	if (isDev && venvReady()) {
-		console.log('[setup] Existing dev venv found, skipping setup')
+	// Fast path: persistent venv
+	if (RUNTIME_MODE !== 'appimage' && venvReady()) {
+		console.log('[setup] Existing venv found, skipping setup')
 		return true
 	}
 
-	// In production, venv is always fresh (temp dir), so no need to check
+	// appimage: always create fresh venv
+	// other: recreate venv if broken
+	if (RUNTIME_MODE !== 'appimage' && fs.existsSync(VENV_DIR)) {
+		// Validate venv integrity
+		try {
+			const result = execSync(`"${VENV_DIR}/bin/python3" -c "print(1)"`, { encoding: 'utf8' }).trim()
+			if (result !== '1') {
+				console.log('[setup] Venv corrupted, recreating...')
+				sf.rmSync(VENV_DIR, { recursive: true, force: true })
+			}
+		} catch {
+			console.log('[setup] Venv broken, recreating...')
+			fs.rmSync(VENV_DIR, { recursive: true, force: true })
+		}
+	}
 
 	// Determine which Python interpreter to use
 	let pythonInterpreter = null
@@ -547,8 +581,8 @@ async function main() {
 		console.log('[quit] Shutting down...')
 		mitm && mitm.kill('SIGTERM')
 
-		// Remove the per-run temp dir (prod only)
-		if (!isDev) {
+		// Remove appimage temp dir
+		if (RUNTIME_MODE === 'appimage') {
 			try {
 				fs.rmSync(RUNTIME_DIR, { recursive: true, force: true })
 			} catch (err) {
