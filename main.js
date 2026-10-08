@@ -119,6 +119,9 @@ function copyDir(src, dest) {
 function deployResources() {
 	if (isDev) return
 
+	// tarball build, MajsoulMax already deployed
+	if (RUNTIME_MODE != 'appimage' && fs.existsSync(path.join(process.resourcesPath, 'MajsoulMax'), MM_DIR)) return
+
 	// The AppImage mount is read-only, copy MajsoulMax to runtime dir
 	console.log(`[setup] Deploying MajsoulMax...`)
 	copyDir(path.join(process.resourcesPath, 'MajsoulMax'), MM_DIR)
