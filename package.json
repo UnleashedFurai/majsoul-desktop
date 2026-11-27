@@ -8,6 +8,7 @@
 		"build": "npm run build:all",
 		"build:appimage": "NODE_ENV=production electron-builder --linux AppImage",
 		"build:tar": "NODE_ENV=production electron-builder --linux tar.gz",
+		"build:unpacked": "NODE_ENV=production electron-builder --linux dir",
 		"build:all": "sh build.sh appimage && sh build.sh tar",
 		"clean": "rm -rf release/ dist/",
 		"clean:full": "rm -rf release/ dist/ build_resources/"
