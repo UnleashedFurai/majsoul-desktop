@@ -6,5 +6,8 @@
 !package.json
 !package-lock.json
 
+!README.org
+!LICENSE
+
 !.gitignore
 !.gitmodules

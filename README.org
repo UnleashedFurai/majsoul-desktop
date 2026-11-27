@@ -1,0 +1,19 @@
+* majsoul-desktop
+
+electron wrapper around web majsoul
+
+unlocks cosmetics with bundled majsoulmax runtime
+
+** note
+
+this has only been tested on linux.
+
+** binaries
+
+prebuilt binaries are in [[https://github.com/UnleashedFurai/majsoul-desktop/releases][releases]].
+
+if you wanna build it yourself, the various options can be seen with ~npm run~.
+
+** thanks
+
+[[https://github.com/Avenshy/MajsoulMax][majsoulmax]] - injecting cosmetics
