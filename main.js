@@ -50,6 +50,8 @@ if (RUNTIME_MODE === 'dev') {
 	VENV_DIR = path.join(PERSISTENT_DIR, 'venv')
 }
 
+const MM_USER_CONFIG = path.join(CONFIG_DIR, 'majsoulmax-conf')
+
 console.log(`[runtime] Mode: ${RUNTIME_MODE}`)
 console.log(`[runtime] Data dir: ${RUNTIME_DIR}`)
 
@@ -119,12 +121,28 @@ function copyDir(src, dest) {
 function deployResources() {
 	if (isDev) return
 
-	// tarball build, MajsoulMax already deployed
-	if (RUNTIME_MODE != 'appimage' && fs.existsSync(path.join(process.resourcesPath, 'MajsoulMax'), MM_DIR)) return
+	if (RUNTIME_MODE === 'appimage') {
+		// The AppImage mount is read-only; deploy code to a temp dir
+		console.log('[setup] Deploying MajsoulMax...')
+		copyDir(path.join(process.resourcesPath, 'MajsoulMax'), MM_DIR)
 
-	// The AppImage mount is read-only, copy MajsoulMax to runtime dir
-	console.log(`[setup] Deploying MajsoulMax...`)
-	copyDir(path.join(process.resourcesPath, 'MajsoulMax'), MM_DIR)
+		// Persist conifg across runs
+		// seed once then symlink so it's read/written from the real location
+		const mmCfg = path.join(MM_DIR, 'config')
+		fs.rmSync(mmCfg, { recursive: true, force: true})
+		if (!fs.existsSync(MM_USER_CONFIG)) {
+			console.log('[setup] Seeding persistent MajsoulMax config.')
+			fs.cpSync(
+				path.join(process.resourcesPath, 'MajsoulMax', 'config'),
+				MM_USER_CONFIG,
+				{ recursive: true }
+			)
+		}
+		fs.symlinkSync(MM_USER_CONFIG, mmCfg, 'dir')
+	} else if (!fs.existsSync(MM_DIR)) {
+		// Tarball build: deploy to persistent dir
+		copyDir(path.join(process.resourcesPath, 'MajsoulMax'), MM_DIR)
+	}
 }
 
 // Load config
